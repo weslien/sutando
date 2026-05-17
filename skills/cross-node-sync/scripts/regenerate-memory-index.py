@@ -106,6 +106,21 @@ def main() -> int:
         print(body[:400])
         return 0
 
+    # Guard against silent data loss when no per-file frontmatter exists yet
+    # (issue #787). The cron chain runs this regen unconditionally after
+    # setup-rsync-sync.sh, even when sync is a no-op (no peer configured).
+    # On a node that hasn't yet split MEMORY.md into per-entry files, the
+    # scan returns 0 entries and the unconditional write_text below would
+    # clobber any inline entries the user has accumulated in MEMORY.md.
+    if not entries and target.exists() and target.stat().st_size > 0:
+        print(
+            f"refuse: 0 frontmatter entries found but {target} is non-empty "
+            f"({target.stat().st_size} bytes) — would clobber inline content. "
+            f"Skipping write. (issue #787)",
+            file=sys.stderr,
+        )
+        return 0
+
     target.write_text(body)
     print(f"wrote {len(entries)} entries to {target}")
     return 0
