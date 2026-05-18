@@ -115,6 +115,13 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 	});
 
 	it('accepts all 5 valid agent states via the correct track', async () => {
+		// Pre-clear tool track. Without this, a prior test (or prior
+		// process state) that left the tool track at `working`/`seeing`
+		// makes /sse-status return that tool-track value instead of the
+		// browser-track value being set below — the tool track has
+		// precedence by design. The "tool track takes precedence" test
+		// at line 149 already follows this convention; closing #800.
+		await fetchJson('/mute-state?state=idle&source=tool');
 		// Browser track (no source=tool): idle / listening / speaking only.
 		for (const state of ['idle', 'listening', 'speaking']) {
 			const body = await fetchJson(`/mute-state?state=${state}`);
