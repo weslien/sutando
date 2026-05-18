@@ -1,0 +1,8 @@
+# Heavy artifacts — auto-downloaded or symlinked at runtime, not committed.
+models/*.onnx
+models/*.bin
+models/*.gguf
+logs/*.mp3
+logs/*.wav
+logs/*.log
+.venv/

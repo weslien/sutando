@@ -179,13 +179,55 @@ else
   export ANTHROPIC_BASE_URL=http://localhost:7846
 fi
 
-# 1. Voice agent (Gemini Live on port 9900)
-if ! lsof -i :9900 > /dev/null 2>&1; then
-  echo "  Starting voice agent (port 9900)..."
-  npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
-  echo "  ✓ voice agent"
-else
-  echo "  ✓ voice agent (already running)"
+# 1. Voice backend — VOICE_BACKEND=bodhi (default) | pipecat
+#
+# bodhi  = Gemini Live via bodhi-realtime-agent on :9900 (the original stack).
+# pipecat = local stack (Whisper STT → llama.cpp → Kokoro TTS) under
+#           skills/local-voice-pipeline/. Set VOICE_BACKEND=pipecat in .env to
+#           switch. Both can coexist on disk; only one runs at a time.
+#
+# Why a flag and not a rip-and-replace: the pipecat path is new (2026-05-18,
+# Phase 1 PoC just landed); keeping bodhi as the default lets us run pipecat
+# behind the flag for a week or two before retiring bodhi.
+VOICE_BACKEND_NORMALIZED="${VOICE_BACKEND:-bodhi}"
+case "$VOICE_BACKEND_NORMALIZED" in
+  pipecat)
+    # Pipecat path. The pipeline.py process is interactive (opens the local
+    # mic via LocalAudioTransport), so we don't background it from here — the
+    # user runs it in their own Ghostty/iTerm window. We DO start llama-server
+    # for them since it's a long-running background sidecar.
+    LVP_DIR="$REPO/skills/local-voice-pipeline"
+    if [ ! -d "$LVP_DIR" ]; then
+      echo "  ✗ VOICE_BACKEND=pipecat but $LVP_DIR not found — falling back to bodhi"
+      VOICE_BACKEND_NORMALIZED=bodhi
+    elif ! lsof -i :8081 > /dev/null 2>&1; then
+      echo "  Starting llama-server (port 8081)..."
+      bash "$LVP_DIR/scripts/llama-server.sh" > "$LVP_DIR/logs/llama-server.log" 2>&1 &
+      # Give it a moment to bind the port, then verify.
+      sleep 2
+      if lsof -i :8081 > /dev/null 2>&1; then
+        echo "  ✓ llama-server"
+      else
+        echo "  ⚠ llama-server failed to bind — check $LVP_DIR/logs/llama-server.log"
+      fi
+    else
+      echo "  ✓ llama-server (already running)"
+    fi
+    if [ "$VOICE_BACKEND_NORMALIZED" = pipecat ]; then
+      echo "  → run pipeline.py in another terminal:"
+      echo "      cd $LVP_DIR && source .venv/bin/activate && python scripts/pipeline.py"
+    fi
+    ;;
+esac
+
+if [ "$VOICE_BACKEND_NORMALIZED" = bodhi ]; then
+  if ! lsof -i :9900 > /dev/null 2>&1; then
+    echo "  Starting voice agent (port 9900)..."
+    npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+    echo "  ✓ voice agent"
+  else
+    echo "  ✓ voice agent (already running)"
+  fi
 fi
 
 # 2. Web client (port 8080)
@@ -386,7 +428,13 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+# voice-agent on :9900 only when bodhi is the active backend; pipecat puts
+# llama-server on :8081 instead and pipeline.py is launched manually.
+if [ "$VOICE_BACKEND_NORMALIZED" = pipecat ]; then
+  VERIFY_PORTS="8081:llama-server 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+else
+  VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+fi
 if [ "${SKIP_PHONE:-}" != "1" ] && grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
   VERIFY_PORTS="$VERIFY_PORTS 3100:conversation-server"
 fi
