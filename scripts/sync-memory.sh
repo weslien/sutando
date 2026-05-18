@@ -17,7 +17,7 @@
 #
 # Env vars (all optional except SUTANDO_MEMORY_REPO):
 #   SUTANDO_MEMORY_REPO     — git URL of your private memory repo (REQUIRED)
-#   SUTANDO_WORKSPACE       — public sutando checkout. Default: ~/Desktop/sutando
+#   SUTANDO_WORKSPACE       — public sutando checkout. Default: derived from this script's location ($script_dir/..)
 #   SUTANDO_MEMORY_SYNC_DIR — local clone path. Default: ~/.sutando/memory-sync
 #                             (was ~/.sutando-memory-sync before #762's
 #                             companion PR; one-time auto-migration below)
@@ -75,9 +75,10 @@ elif [ "$(basename "$SCRIPT_PARENT")" = ".sutando-memory-sync" ]; then
 else
     SYNC_DIR="$__NEW_DEFAULT"
 fi
-REPO_DIR="${SUTANDO_WORKSPACE:-$HOME/Desktop/sutando}"
+__SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${SUTANDO_WORKSPACE:-$(cd "$__SCRIPT_DIR/.." && pwd)}"
 if [ ! -d "$REPO_DIR" ]; then
-    echo "sync-memory: workspace not found at $REPO_DIR; set SUTANDO_WORKSPACE or clone sutando to ~/Desktop/sutando." >&2
+    echo "sync-memory: workspace not found at $REPO_DIR; set SUTANDO_WORKSPACE to your sutando checkout." >&2
     exit 0
 fi
 MEMORY_DIR="$HOME/.claude/projects/$(echo "$REPO_DIR" | sed 's|/|-|g')/memory"
