@@ -425,6 +425,223 @@ async def summon_handler(params: FunctionCallParams) -> None:
 
 
 # ===========================================================================
+# set_voice — change the Kokoro TTS voice (Alice, Heart, etc.)
+# ===========================================================================
+
+# Curated list — 54 voices ship with Kokoro v1.0; the LLM doesn't need them
+# all in the schema. Prefix scheme: <lang><gender>_<name>. lang ∈ {a/American,
+# b/British, e/Spanish, f/French, h/Hindi, i/Italian, j/Japanese,
+# p/Portuguese, z/Chinese}, gender ∈ {f/female, m/male}.
+KNOWN_VOICES = [
+    # American female
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    # American male
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    # British
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    # Other languages (shortlist)
+    "ef_dora", "em_alex", "ff_siwis",
+    "hf_alpha", "hm_omega", "if_sara", "im_nicola",
+    "jf_alpha", "jm_kumo", "pf_dora", "pm_alex",
+    "zf_xiaoxiao", "zm_yunjian",
+]
+
+
+SET_VOICE_SCHEMA = FunctionSchema(
+    name="set_voice",
+    description=(
+        "Change the TTS voice. Pipeline restarts (~10s) so the user will "
+        "hear a brief silence then the new voice. Use when the user asks "
+        "to change accent, gender, or pick a specific voice (e.g. \"sound "
+        "British\", \"use a male voice\", \"use Alice\")."
+    ),
+    properties={
+        "voice_id": {
+            "type": "string",
+            "description": (
+                "Kokoro voice id, format <lang><gender>_<name>. Common picks: "
+                "bf_alice (British female), bf_emma (British female), "
+                "bm_george (British male), af_heart (American female warm), "
+                "af_nicole (American female), am_michael (American male), "
+                "am_onyx (American male deep). Full set: af_* (11), am_* (9), "
+                "bf_* (4), bm_* (4), plus es/fr/hi/it/ja/pt/zh variants."
+            ),
+            "enum": KNOWN_VOICES,
+        },
+    },
+    required=["voice_id"],
+)
+
+
+async def set_voice_handler(params: FunctionCallParams) -> None:
+    args = params.arguments or {}
+    voice_id = str(args.get("voice_id", "")).strip()
+    if not voice_id:
+        await params.result_callback({"status": "error", "error": "empty voice_id"})
+        return
+    cfg_path = WORKSPACE / "state" / "pipeline-config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    except Exception:
+        cfg = {}
+    cfg["voice_id"] = voice_id
+    cfg_path.write_text(json.dumps(cfg, indent=2))
+    # Trigger restart via web-client. Don't await — pipeline kills itself
+    # mid-restart, and the result_callback below needs to return before that.
+    asyncio.create_task(_post_pipeline_restart())
+    await params.result_callback({
+        "status": "done",
+        "result": f"Voice set to {voice_id}. Restarting pipeline now — you'll hear silence for about 10 seconds, then the new voice.",
+    })
+
+
+# ===========================================================================
+# list_audio_devices / set_audio_device — switch mic or speakers
+# ===========================================================================
+
+
+def _query_audio_devices() -> list[dict]:
+    """Wrap sounddevice.query_devices() — used both by the schema enum
+    builder and the runtime list tool."""
+    import sounddevice as sd
+    return [
+        {
+            "index": i,
+            "name": d["name"],
+            "max_input": d["max_input_channels"],
+            "max_output": d["max_output_channels"],
+        }
+        for i, d in enumerate(sd.query_devices())
+    ]
+
+
+LIST_AUDIO_DEVICES_SCHEMA = FunctionSchema(
+    name="list_audio_devices",
+    description=(
+        "List all audio input + output devices available to the pipeline. "
+        "Returns index, name, and whether each is an input or output. "
+        "Use before set_audio_device when the user asks what's available."
+    ),
+    properties={},
+    required=[],
+)
+
+
+async def list_audio_devices_handler(params: FunctionCallParams) -> None:
+    try:
+        devs = await asyncio.to_thread(_query_audio_devices)
+        inputs = [d for d in devs if d["max_input"] > 0]
+        outputs = [d for d in devs if d["max_output"] > 0]
+        summary = (
+            f"Inputs ({len(inputs)}): "
+            + ", ".join(f"#{d['index']} {d['name']}" for d in inputs[:8])
+            + (". " if inputs else "")
+            + f"Outputs ({len(outputs)}): "
+            + ", ".join(f"#{d['index']} {d['name']}" for d in outputs[:8])
+        )
+        await params.result_callback({"status": "done", "result": summary})
+    except Exception as e:
+        await params.result_callback({"status": "error", "error": f"query failed: {e}"})
+
+
+SET_AUDIO_DEVICE_SCHEMA = FunctionSchema(
+    name="set_audio_device",
+    description=(
+        "Switch the pipeline's audio input (mic) or output (speakers/headphones). "
+        "Pipeline restarts (~10s) to bind the new device. Use when the user "
+        "asks to switch to a specific mic or speaker (e.g. \"use my AirPods\", "
+        "\"switch to the built-in mic\")."
+    ),
+    properties={
+        "direction": {
+            "type": "string",
+            "description": "Which side to switch.",
+            "enum": ["input", "output"],
+        },
+        "device": {
+            "type": "string",
+            "description": (
+                "Device index (\"3\") or a substring of the device name "
+                "(\"AirPods\", \"MacBook\"). Substring is case-insensitive."
+            ),
+        },
+    },
+    required=["direction", "device"],
+)
+
+
+async def set_audio_device_handler(params: FunctionCallParams) -> None:
+    args = params.arguments or {}
+    direction = str(args.get("direction", "")).strip().lower()
+    device = str(args.get("device", "")).strip()
+    if direction not in ("input", "output") or not device:
+        await params.result_callback({
+            "status": "error",
+            "error": "direction must be 'input' or 'output' and device must be non-empty",
+        })
+        return
+    try:
+        devs = await asyncio.to_thread(_query_audio_devices)
+    except Exception as e:
+        await params.result_callback({"status": "error", "error": f"query failed: {e}"})
+        return
+    # Resolve device — int → index, else substring match on name. Restrict
+    # the candidate set to devices that actually support the requested
+    # direction so "switch input to AirPods" doesn't pick the output channel.
+    target_idx: int | None = None
+    if device.isdigit():
+        idx = int(device)
+        if any(d["index"] == idx for d in devs):
+            target_idx = idx
+    else:
+        needle = device.lower()
+        cand_field = "max_input" if direction == "input" else "max_output"
+        matches = [d for d in devs if d[cand_field] > 0 and needle in d["name"].lower()]
+        if matches:
+            target_idx = matches[0]["index"]
+    if target_idx is None:
+        await params.result_callback({
+            "status": "error",
+            "error": f"no {direction} device matches \"{device}\". Try list_audio_devices.",
+        })
+        return
+    cfg_path = WORKSPACE / "state" / "pipeline-config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    except Exception:
+        cfg = {}
+    cfg[f"{direction}_device_index"] = target_idx
+    cfg_path.write_text(json.dumps(cfg, indent=2))
+    asyncio.create_task(_post_pipeline_restart())
+    chosen = next(d for d in devs if d["index"] == target_idx)
+    await params.result_callback({
+        "status": "done",
+        "result": f"{direction.capitalize()} set to #{target_idx} ({chosen['name']}). Restarting pipeline — silence for about 10 seconds.",
+    })
+
+
+async def _post_pipeline_restart() -> None:
+    """Fire-and-forget POST to web-client's /pipeline/restart. Used by the
+    config-mutating tools so the pipeline picks up new settings without the
+    user having to click anything."""
+    import urllib.request
+    port = os.environ.get("CLIENT_PORT", "8080")
+    url = f"http://127.0.0.1:{port}/pipeline/restart"
+    def _do():
+        try:
+            req = urllib.request.Request(url, method="POST", data=b"")
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception as e:
+            logger.warning(f"pipeline restart POST failed: {e}")
+    await asyncio.to_thread(_do)
+
+
+# ===========================================================================
 # registration helpers
 # ===========================================================================
 
@@ -436,6 +653,9 @@ ALL_SCHEMAS: list[FunctionSchema] = [
     SAVE_NOTE_SCHEMA,
     READ_NOTE_SCHEMA,
     SUMMON_SCHEMA,
+    SET_VOICE_SCHEMA,
+    LIST_AUDIO_DEVICES_SCHEMA,
+    SET_AUDIO_DEVICE_SCHEMA,
 ]
 
 _HANDLERS: dict[str, Any] = {
@@ -445,6 +665,9 @@ _HANDLERS: dict[str, Any] = {
     "save_note": save_note_handler,
     "read_note": read_note_handler,
     "summon": summon_handler,
+    "set_voice": set_voice_handler,
+    "list_audio_devices": list_audio_devices_handler,
+    "set_audio_device": set_audio_device_handler,
 }
 
 
